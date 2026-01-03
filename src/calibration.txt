@@ -1,0 +1,377 @@
+
+/*
+  Rui Santos
+  Complete project details at https://RandomNerdTutorials.com/arduino-load-cell-hx711/
+  
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files.
+  
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+*/
+
+// Calibrating the load cell
+#include "HX711.h"
+
+// HX711 circuit wiring
+const int LOADCELL_DOUT_PIN = 32;
+const int LOADCELL_SCK_PIN = 33;
+// static const int HX_DOUT = 32;
+// static const int HX_SCK  = 33;
+
+HX711 scale;
+
+void setup() {
+  Serial.begin(57600);
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+}
+
+void loop() {
+
+  if (scale.is_ready()) {
+    scale.set_scale();    
+    Serial.println("Tare... remove any weights from the scale.");
+    delay(5000);
+    scale.tare();
+    Serial.println("Tare done...");
+    Serial.print("Place a known weight on the scale...");
+    delay(5000);
+    long reading = scale.get_units(10);
+    Serial.print("Result: ");
+    Serial.println(reading);
+  } 
+  else {
+    Serial.println("HX711 not found.");
+  }
+  delay(1000);
+}
+
+//calibration factor will be the (reading)/(known weight)
+
+
+
+______________________________-
+
+
+
+#include "HX711.h"
+
+// Your pins (ESP32)
+static const int DOUT = 32;
+static const int SCK  = 33;
+
+HX711 scale;
+
+// ---- Tuning knobs ----
+static const int   SAMPLE_HZ        = 40;     // how often we sample
+static const int   CAPTURE_SECONDS  = 3;      // capture window
+static const float STABLE_BAND      = 5.0f;   // raw units band (adjust)
+static const int   STABLE_COUNT_REQ = 25;     // how many consecutive samples needed
+
+// Helper: simple median of an array (copy + sort)
+float medianOf(float* a, int n) {
+  // insertion sort (n is small)
+  for (int i = 1; i < n; i++) {
+    float key = a[i];
+    int j = i - 1;
+    while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = key;
+  }
+  if (n % 2 == 1) return a[n / 2];
+  return 0.5f * (a[n/2 - 1] + a[n/2]);
+}
+
+// Capture a "stable" raw reading (without assuming it is stable)
+bool captureStableRaw(float& outRaw) {
+  const int maxN = SAMPLE_HZ * CAPTURE_SECONDS;
+  float buf[maxN];
+
+  int n = 0;
+  int stableCount = 0;
+  float lastMed = 0;
+
+  const uint32_t periodMs = 1000 / SAMPLE_HZ;
+  uint32_t t0 = millis();
+
+  while (millis() - t0 < (uint32_t)CAPTURE_SECONDS * 1000UL) {
+    if (!scale.is_ready()) continue;
+
+    // read raw average of a few samples (helps)
+    float raw = (float)scale.read_average(3);
+
+    if (n < maxN) buf[n++] = raw;
+
+    // compute median of last chunk (use last up to 25 samples)
+    const int chunk = (n < 25) ? n : 25;
+    float tmp[25];
+    for (int i = 0; i < chunk; i++) tmp[i] = buf[n - chunk + i];
+    float med = medianOf(tmp, chunk);
+
+    if (n > 5) {
+      if (fabsf(med - lastMed) <= STABLE_BAND) stableCount++;
+      else stableCount = 0;
+    }
+    lastMed = med;
+
+    delay(periodMs);
+  }
+
+  // Final median of all captured samples
+  if (n < 20) return false;
+
+  // Copy & median
+  float all[maxN];
+  for (int i = 0; i < n; i++) all[i] = buf[i];
+  outRaw = medianOf(all, n);
+
+  // Require some stability evidence
+  return stableCount >= STABLE_COUNT_REQ;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  scale.begin(DOUT, SCK);
+
+  // IMPORTANT: during calibration, force scale factor to 1 so we're dealing in raw-ish units
+  scale.set_scale(1.0f);
+
+  Serial.println("\n=== HX711 Stable Calibration ===");
+  Serial.println("Remove everything from the scale.");
+  delay(2000);
+
+  Serial.println("Taring...");
+  scale.tare(20);
+  Serial.println("Tare done.");
+
+  Serial.println("\nNow place your KNOWN WEIGHT and keep it still.");
+  Serial.println("When stable, I will capture a reading.");
+}
+
+void loop() {
+  if (!scale.is_ready()) {
+    Serial.println("HX711 not ready.");
+    delay(500);
+    return;
+  }
+
+  float rawStable = 0;
+  Serial.println("\nCapturing stable raw reading (3s window)...");
+  bool ok = captureStableRaw(rawStable);
+
+  Serial.print("Stable capture ok: ");
+  Serial.println(ok ? "YES" : "NO");
+  Serial.print("Captured raw value: ");
+  Serial.println(rawStable, 2);
+
+  // Put your known weight here (grams)
+  const float knownWeightG = 100.0f;  // <-- change this
+
+  // Calibration factor for bogde library:
+  // scale.set_scale(calFactor); units = (raw - offset) / calFactor
+  // So: calFactor = rawStable / knownWeight
+  float calFactor = rawStable / knownWeightG;
+
+  Serial.print("Known weight (g): ");
+  Serial.println(knownWeightG, 2);
+
+  Serial.print("Suggested calibration factor: ");
+  Serial.println(calFactor, 6);
+
+  Serial.println("\nNext step:");
+  Serial.println("1) Put calFactor into your main code: g_calFactor = <value>");
+  Serial.println("2) Call set_scale(g_calFactor)");
+  Serial.println("3) Re-check with the same known weight.");
+
+  delay(10000);
+}
+
+
+
+______________________________
+++++++++++++++++++++++++++++++
+static const int HX_DOUT = 4;
+static const int HX_SCK  = 3;
+
+
+
+#include "HX711.h"
+
+// Your pins (ESP32)
+static const int HX_DOUT_PIN = 32;
+static const int HX_SCK_PIN  = 33; // NOTE: don't name this SCK (conflicts with ESP32 SPI SCK)
+
+HX711 scale;
+
+// ---- Tuning knobs ----
+static const int   SAMPLE_HZ        = 40;      // not critical; HX711 data-rate dominates
+static const int   CAPTURE_SECONDS  = 12;      // longer window for 10 SPS modules
+static const float STABLE_BAND      = 600.0f;  // raw HX711 counts band (start here; tune)
+static const int   STABLE_COUNT_REQ = 6;       // consecutive median checks within band
+
+// Helper: simple median of an array (copy + sort)
+float medianOf(float* a, int n) {
+  // insertion sort (n is small)
+  for (int i = 1; i < n; i++) {
+    float key = a[i];
+    int j = i - 1;
+    while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; j--; }
+    a[j + 1] = key;
+  }
+  if (n % 2 == 1) return a[n / 2];
+  return 0.5f * (a[n/2 - 1] + a[n/2]);
+}
+
+// Capture a "stable" raw reading (without assuming it is stable)
+bool captureStableRaw(float& outRaw) {
+  const int maxN = SAMPLE_HZ * CAPTURE_SECONDS;
+  float buf[maxN];
+
+  int n = 0;
+  int stableCount = 0;
+  float lastMed = 0;
+
+  uint32_t t0 = millis();
+
+  while (millis() - t0 < (uint32_t)CAPTURE_SECONDS * 1000UL) {
+    if (!scale.is_ready()) {
+      delay(1);
+      continue;
+    }
+
+    // Read ONE sample per ready pulse (HX711 data-rate dominates anyway)
+    float raw = (float)scale.read();
+
+    if (n < maxN) buf[n++] = raw;
+
+    // compute median of last chunk (use last up to 15 samples)
+    const int chunk = (n < 15) ? n : 15;
+    float tmp[15];
+    for (int i = 0; i < chunk; i++) tmp[i] = buf[n - chunk + i];
+    float med = medianOf(tmp, chunk);
+
+    if (n > 3) {
+      if (fabsf(med - lastMed) <= STABLE_BAND) stableCount++;
+      else stableCount = 0;
+    }
+    lastMed = med;
+
+    // No fixed delay here; wait for the next HX711-ready instead
+  }
+
+  // Final median of all captured samples
+  if (n < 6) {
+    Serial.print("capture: n=");
+    Serial.print(n);
+    Serial.print(" stableCount=");
+    Serial.print(stableCount);
+    Serial.print(" lastMed=");
+    Serial.println(lastMed, 2);
+    return false;
+  }
+
+  // Copy & median
+  float all[maxN];
+  for (int i = 0; i < n; i++) all[i] = buf[i];
+  outRaw = medianOf(all, n);
+
+  // Debug: show how many samples and stability count
+  Serial.print("capture: n=");
+  Serial.print(n);
+  Serial.print(" stableCount=");
+  Serial.print(stableCount);
+  Serial.print(" lastMed=");
+  Serial.println(lastMed, 2);
+
+  // Require some stability evidence
+  return stableCount >= STABLE_COUNT_REQ;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500); // give the serial monitor time to attach (avoids missing boot prints)
+  Serial.println("\nBooting calibration sketch...");
+  Serial.printf("Pins: DOUT=%d  SCK=%d\n", HX_DOUT_PIN, HX_SCK_PIN);
+  delay(500);
+
+  scale.begin(HX_DOUT_PIN, HX_SCK_PIN);
+
+  // IMPORTANT: during calibration, force scale factor to 1 so we're dealing in raw-ish units
+  scale.set_scale(1.0f);
+
+  Serial.println("\n=== HX711 Stable Calibration ===");
+  Serial.println("Remove everything from the scale.");
+  delay(2000);
+
+  Serial.println("Taring...");
+  scale.tare(20);
+  Serial.println("Tare done.");
+
+  Serial.println("\nNow place your KNOWN WEIGHT and keep it still.");
+  Serial.println("When stable, I will capture a reading.");
+  Serial.println("\nType 'c' then Enter to capture a calibration reading.");
+}
+
+void loop() {
+  static uint32_t lastBeat = 0;
+  if (millis() - lastBeat >= 2000) {
+    lastBeat = millis();
+    Serial.print("ready=");
+    Serial.println(scale.is_ready() ? "YES" : "NO");
+    Serial.println("Type 'c' + Enter to capture");
+  }
+
+  // Only run capture when requested
+  if (Serial.available()) {
+    char ch = (char)Serial.read();
+    Serial.print("RX: '");
+    Serial.print(ch);
+    Serial.println("'");
+
+    // ignore newline / carriage return noise
+    if (ch == '\n' || ch == '\r') {
+      while (Serial.available()) Serial.read();
+      delay(20);
+      return;
+    }
+
+    if (ch == 'c' || ch == 'C') {
+      // Flush the rest of the line
+      while (Serial.available()) Serial.read();
+
+      float rawStable = 0;
+      Serial.println("\nCapturing stable raw reading (12s window)...");
+      bool ok = captureStableRaw(rawStable);
+
+      Serial.print("Stable capture ok: ");
+      Serial.println(ok ? "YES" : "NO");
+      Serial.print("Captured raw value (median): ");
+      Serial.println(rawStable, 2);
+
+      // Put your known weight here (grams)
+      const float knownWeightG = 3.60f;  // <-- set to your actual reference weight in grams
+
+      float calFactor = rawStable / knownWeightG;
+
+      Serial.print("Known weight (g): ");
+      Serial.println(knownWeightG, 2);
+
+      Serial.print("Suggested calibration factor: ");
+      Serial.println(calFactor, 6);
+
+      Serial.println("\nNext step:");
+      Serial.println("1) Put calFactor into your main code: g_calFactor = <value>");
+      Serial.println("2) Call set_scale(g_calFactor)");
+      Serial.println("3) Re-check with the same known weight.");
+
+      Serial.println("\nType 'c' then Enter to capture again.");
+    } else {
+      // ignore other input
+      while (Serial.available()) Serial.read();
+    }
+  }
+
+  delay(20);
+  return;
+}
